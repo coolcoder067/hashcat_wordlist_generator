@@ -98,11 +98,11 @@ class WordlistGenerator:
     
     join_functions = []
     if args.variation_join_none:
-        join_functions.append(lambda words: ''.join(variation))
+        join_functions.append(lambda words: ''.join(words))
     if args.variation_join_dash:
-        join_functions.append(lambda words: '-'.join(variation))
+        join_functions.append(lambda words: '-'.join(words))
     if args.variation_join_underscore:
-        join_functions.append(lambda words: '_'.join(variation))
+        join_functions.append(lambda words: '_'.join(words))
 
     def __init__(self):
         self.list = set()
