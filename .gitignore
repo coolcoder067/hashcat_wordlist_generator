@@ -1,4 +1,3 @@
 /.venv
-/apicache
-/throttle.ctrl
+/cache/
 .DS_Store

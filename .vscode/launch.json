@@ -7,11 +7,12 @@
             "request": "launch",
             "program": "${file}",
             "args": [
+                "--mw-source",
                 "https://undertale.fandom.com/api.php",
-                "--page",
-                "True Pacifist Route",
-                "--variation-chars-original",
-                "on"
+                "--mw-category",
+                "Boss",
+                "--mw-page",
+                "True Pacifist Route"
             ]
         }
     ]
