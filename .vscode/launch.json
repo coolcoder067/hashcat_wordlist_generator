@@ -10,7 +10,8 @@
                 "https://undertale.fandom.com/api.php",
                 "--page",
                 "True Pacifist Route",
-                "--variation-chars-original"
+                "--variation-chars-original",
+                "on"
             ]
         }
     ]
