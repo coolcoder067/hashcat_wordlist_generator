@@ -8,11 +8,12 @@
             "program": "${file}",
             "args": [
                 "--mw-source",
-                "https://en.wikipedia.org/w/api.php",
+                "https://undertale.fandom.com/api.php",
                 "--mw-category",
-                "Jewish American physicists"
+                "Boss",
+                "--mw-page",
+                "True Pacifist Route"
             ]
         }
     ]
-
 }

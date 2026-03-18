@@ -3,7 +3,7 @@ import sys
 import mwparserfromhell
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from time import sleep, time
+from time import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -123,41 +123,43 @@ def wikicode_iterate(wikicode: mwparserfromhell.wikicode.Wikicode):
 			
 			
 class WordlistGenerator:
-	special_chars_functions = []
-	if args.variation_chars_original:
-		special_chars_functions.append(lambda text: ''.join(filter(lambda c: 32 <= ord(c) <= 126, text))) # Don't include newline, tab
-	if args.variation_chars_lettersonly:
-		special_chars_functions.append(lambda text: ''.join(filter(lambda c: ord(c) == 32 or 65 <= ord(c) <= 90 or 97 <= ord(c) <= 122, text))) # space, A-Z, a-z
-	if args.variation_chars_alnum:
-		special_chars_functions.append(lambda text: ''.join(filter(lambda c: ord(c) == 32 or 48 <= ord(c) <= 57 or 65 <= ord(c) <= 90 or 97 <= ord(c) <= 122, text))) # space, 0-9, A-Z, a-z
-	if args.variation_chars_nopunctuation:
-		special_chars_functions.append(lambda text: ''.join(filter(lambda c: 32 <= ord(c) <= 126 and c not in '!,.?;:', text))) # Don't include newline, tab, ,.?!;:
-	
-	capitalization_functions = []
-	if args.variation_cap_original:
-		capitalization_functions.append(lambda words: words)
-	if args.variation_cap_camelcase:
-		capitalization_functions.append(lambda words: (words[0].lower(), *[word[0].upper() + word[1:].lower() for word in words[1:]]))
-	if args.variation_cap_uppercase:
-		capitalization_functions.append(lambda words: (word.upper() for word in words))
-	if args.variation_cap_lowercase:
-		capitalization_functions.append(lambda words: (word.lower() for word in words))
-	if args.variation_cap_titlecase:
-		capitalization_functions.append(lambda words: (word[0].upper() + word[1:].lower() for word in words))
-	
-	join_functions = []
-	if args.variation_join_space:
-		join_functions.append(lambda words: ' '.join(words))
-	if args.variation_join_none:
-		join_functions.append(lambda words: ''.join(words))
-	if args.variation_join_dash:
-		join_functions.append(lambda words: '-'.join(words))
-	if args.variation_join_underscore:
-		join_functions.append(lambda words: '_'.join(words))
 
-	def __init__(self):
+	def __init__(self, args):
+		self.special_chars_functions = []
+		if args.variation_chars_original:
+			self.special_chars_functions.append(lambda text: ''.join(filter(lambda c: 32 <= ord(c) <= 126, text))) # Don't include newline, tab
+		if args.variation_chars_lettersonly:
+			self.special_chars_functions.append(lambda text: ''.join(filter(lambda c: ord(c) == 32 or 65 <= ord(c) <= 90 or 97 <= ord(c) <= 122, text))) # space, A-Z, a-z
+		if args.variation_chars_alnum:
+			self.special_chars_functions.append(lambda text: ''.join(filter(lambda c: ord(c) == 32 or 48 <= ord(c) <= 57 or 65 <= ord(c) <= 90 or 97 <= ord(c) <= 122, text))) # space, 0-9, A-Z, a-z
+		if args.variation_chars_nopunctuation:
+			self.special_chars_functions.append(lambda text: ''.join(filter(lambda c: 32 <= ord(c) <= 126 and c not in '!,.?;:', text))) # Don't include newline, tab, ,.?!;:
+		
+		self.capitalization_functions = []
+		if args.variation_cap_original:
+			self.capitalization_functions.append(lambda words: words)
+		if args.variation_cap_camelcase:
+			self.capitalization_functions.append(lambda words: (words[0].lower(), *[word[0].upper() + word[1:].lower() for word in words[1:]]))
+		if args.variation_cap_uppercase:
+			self.capitalization_functions.append(lambda words: (word.upper() for word in words))
+		if args.variation_cap_lowercase:
+			self.capitalization_functions.append(lambda words: (word.lower() for word in words))
+		if args.variation_cap_titlecase:
+			self.capitalization_functions.append(lambda words: (word[0].upper() + word[1:].lower() for word in words))
+		
+		self.join_functions = []
+		if args.variation_join_space:
+			self.join_functions.append(lambda words: ' '.join(words))
+		if args.variation_join_none:
+			self.join_functions.append(lambda words: ''.join(words))
+		if args.variation_join_dash:
+			self.join_functions.append(lambda words: '-'.join(words))
+		if args.variation_join_underscore:
+			self.join_functions.append(lambda words: '_'.join(words))
+		
 		self.list = set()
 		self.buffers = [[] for x in self.special_chars_functions] # There is one buffer for each filtering variation (original, lettersonly, lettersnumbers)
+		
 
 	def process_variations(self, words):
 		for c_func in self.capitalization_functions:
@@ -191,7 +193,7 @@ class MediawikiScraper:
 	chunk_size = 50
 	cache_dir = Path(__file__).parent / 'cache'
 
-	def safe_request(self, params):
+	def _safe_request(self, params):
 		try:
 			resp = self.session.get(self.url, params=params)
 			if not resp.ok:
@@ -199,27 +201,35 @@ class MediawikiScraper:
 		except requests.RequestException as e:
 			raise WordlistGenerationError(f'Request error for host {self.url}: {e}')
 		data = resp.json()
-		if hasattr(data, 'error'):
+		if 'error' in data:
 			raise WordlistGenerationError(f'Api returned error for {resp.url}: {data['error']['message']}')
 		return data
 
-	def chunked_request(self, params: dict, key: str, values: set):
+	def _chunked_request(self, query_namespace, params: dict, key: str, values: set):
 		values_list = list(values)
-		result = {}
+		result = []
 		for i in range(0, len(values_list), self.chunk_size):
 			chunk = values_list[i:i+self.chunk_size]
 			params[key] = '|'.join(str(value) for value in chunk)
-			result |= self.safe_request(params)['query']
+			data = self._safe_request(params)['query'][query_namespace]
+			if type(data) is list:
+				result.extend(data)
+			else:
+				result.extend(data.values())
 		return result
 	
-	def request_with_continue(self, params: dict, continue_param):
-		result = {}
+	def _request_with_continue(self, query_namespace, params: dict, continue_param):
+		result = []
 		while True:
-			data = self.safe_request(params)
-			result |= data['query']
+			response = self._safe_request(params)
+			data = response['query'][query_namespace]
+			if type(data) is list:
+				result.extend(data)
+			else:
+				result.extend(data.values())
 			if 'continue' not in data:
 				break
-			params[continue_param] = data['continue'][continue_param]
+			params[continue_param] = response['continue'][continue_param]
 		return result
 
 
@@ -239,11 +249,10 @@ class MediawikiScraper:
 					'cmtype': 'page',
 					'format': 'json'
 				}
-				query_result = self.request_with_continue(params, 'cmcontinue')
 				with open(cache_location, 'w') as file:
-					for page in query_result['categorymembers']:
+					for page in self._request_with_continue('categorymembers', params, 'cmcontinue'):
 						page_ids.add(page['pageid'])
-						file.write(str(page['pageid'] + '\n'))
+						file.write(str(page['pageid']) + '\n')
 			else:
 				with open(cache_location, 'r') as file:
 					for line in file:
@@ -261,23 +270,20 @@ class MediawikiScraper:
 				unknown_titles.add(page_title)
 			else:
 				# Read from cache
-				print(f'- Using cache for id of page "{page_title}"')
 				with open(cache_location, 'r') as file:
 					page_ids.add(int(file.read()))
-		if len(unknown_titles) > 0:
-			params = {
-				'action': 'query',
-				'format': 'json'
-			}
-			data = self.chunked_request(params, 'titles', titles)
-			for page in data['query']['pages'].values():
-				if hasattr(page, 'missing'):
-					raise WordlistGenerationError(f'No such page with title {page['title']}')
-				page_ids.add(page['pageid'])
-				cache_location = self.cache_dir / self.hostname / 'page_titles' / page['title']
-				with open(cache_location, 'w') as file:
-					file.write(str(page['pageid']))
-
+		# Not in cache
+		params = {
+			'action': 'query',
+			'format': 'json'
+		}
+		for page in self._chunked_request('pages', params, 'titles', titles):
+			if 'missing' in page:
+				raise WordlistGenerationError(f'No such page with title {page['title']}')
+			page_ids.add(page['pageid'])
+			cache_location = self.cache_dir / self.hostname / 'page_titles' / page['title']
+			with open(cache_location, 'w') as file:
+				file.write(str(page['pageid']))
 		return page_ids
 	
 	def get_content_of_pages(self, page_ids: set[int]):
@@ -292,25 +298,22 @@ class MediawikiScraper:
 				unknown_page_ids.add(page_id)
 			else:
 				# Read from cache
-				print(f'- Using cache for content of page id={page_id}')
 				with open(cache_location, 'r') as file:
 					page_contents.add(file.read())
-		if len(unknown_page_ids) > 0:
-			for page_id in unknown_page_ids:
-				params = {
-					'action': 'query',
-					'prop': 'revisions',
-					'rvprop': 'content',
-					'rvslots': 'main',
-					'format': 'json'
-				}
-				data = self.chunked_request(params, 'pageids', page_ids)
-				for page in data['query']['pages'].values():
-					c = page['revisions'][0]['slots']['main']['*']
-					page_contents.add(c)
-					cache_location = self.cache_dir / self.hostname / 'page_content' / str(page_id)
-					with open(cache_location, 'w') as file:
-						file.write(c)
+		# Pages not in cache
+		params = {
+			'action': 'query',
+			'prop': 'revisions',
+			'rvprop': 'content',
+			'rvslots': 'main',
+			'format': 'json'
+		}
+		for page in self._chunked_request('pages', params, 'pageids', unknown_page_ids):
+			c = page['revisions'][0]['slots']['main']['*']
+			page_contents.add(c)
+			cache_location = self.cache_dir / self.hostname / 'page_content' / str(page['pageid'])
+			with open(cache_location, 'w') as file:
+				file.write(c)
 		return page_contents
 	
 	def get_all_ids(self):
@@ -325,9 +328,8 @@ class MediawikiScraper:
 				'aplimit': 'max',
 				'format': 'json',
 			}
-			data = self.request_with_continue(params, 'apcontinue')
 			with open(cache_location, 'w') as file:
-				for page in data['query']['allpages'].values():
+				for page in self._request_with_continue('allpages', params, 'apcontinue'):
 					ids.add(int(page['pageid']))
 					file.write(str(page['pageid']) + '\n')
 		else:
@@ -346,7 +348,7 @@ class MediawikiScraper:
 
 
 
-wl = WordlistGenerator()
+wl = WordlistGenerator(args)
 
 
 try:
@@ -361,7 +363,6 @@ try:
 		# For each mediawiki source
 		for config in args.mw_sources:
 			mw = MediawikiScraper(config['url'], session)
-			print(f'Processsing MediaWiki source: {mw.url}')
 			if len(config['categories']) == 0 and len(config['pages']) == 0:
 				try:
 					input(f'Since no categories or pages were specified, the ENTIRE wiki for {config["url"]} will be downloaded. Press [Enter] to confirm. ')
@@ -374,7 +375,7 @@ try:
 				page_ids = mw.get_page_ids_from_categories(config['categories'])
 				page_ids |= mw.get_ids_of_titles(config['pages'])
 
-			for content in  mw.get_content_of_pages(page_ids):
+			for content in mw.get_content_of_pages(page_ids):
 				wikicode_iterate(mwparserfromhell.parse(content))
 
 
