@@ -2,11 +2,10 @@ import argparse
 import sys
 import mwparserfromhell
 import requests
+from requests.adapters import HTTPAdapter, Retry
 from time import sleep, time
 from pathlib import Path
 from urllib.parse import urlparse
-
-cache_dir = Path(__file__).parent / 'cache'
 
 class WordlistGenerationError(Exception):
 	pass
@@ -103,6 +102,26 @@ args.variation_chars_nopunctuation = args.variation_chars_nopunctuation == 'on'
 if args.consecutive_words_important < args.consecutive_words:
 	args.consecutive_words_important = args.consecutive_words
 
+def wikicode_iterate(wikicode: mwparserfromhell.wikicode.Wikicode):
+	if wikicode is not None:
+		for node in wikicode.nodes:
+			if isinstance(node, mwparserfromhell.nodes.Tag):
+				wikicode_iterate(node.contents)
+			elif isinstance(node, mwparserfromhell.nodes.Text):
+				wl.continue_text_input(node.value)
+			elif isinstance(node, mwparserfromhell.nodes.Wikilink):
+				if node.title.startswith('Image:') or node.title.startswith('File:'):
+					continue
+				if node.text is None:
+					wikicode_iterate(node.title)
+				else:
+					wikicode_iterate(node.text)
+			elif isinstance(node, mwparserfromhell.nodes.ExternalLink):
+				wikicode_iterate(node.title) # type: ignore
+			elif isinstance(node, mwparserfromhell.nodes.Heading):
+				wikicode_iterate(node.title)
+			
+			
 class WordlistGenerator:
 	special_chars_functions = []
 	if args.variation_chars_original:
@@ -166,250 +185,207 @@ class WordlistGenerator:
 						self.process_variations(section_buffer[buffer_index:])
 
 
+
+
+class MediawikiScraper:
+	chunk_size = 50
+	cache_dir = Path(__file__).parent / 'cache'
+
+	def safe_request(self, params):
+		try:
+			resp = self.session.get(self.url, params=params)
+			if not resp.ok:
+				raise WordlistGenerationError(f'HTTP error {resp.status_code} for url {resp.url}')
+		except requests.RequestException as e:
+			raise WordlistGenerationError(f'Request error for host {self.url}: {e}')
+		data = resp.json()
+		if hasattr(data, 'error'):
+			raise WordlistGenerationError(f'Api returned error for {resp.url}: {data['error']['message']}')
+		return data
+
+	def chunked_request(self, params: dict, key: str, values: set):
+		values_list = list(values)
+		result = {}
+		for i in range(0, len(values_list), self.chunk_size):
+			chunk = values_list[i:i+self.chunk_size]
+			params[key] = '|'.join(str(value) for value in chunk)
+			result |= self.safe_request(params)['query']
+		return result
+	
+	def request_with_continue(self, params: dict, continue_param):
+		result = {}
+		while True:
+			data = self.safe_request(params)
+			result |= data['query']
+			if 'continue' not in data:
+				break
+			params[continue_param] = data['continue'][continue_param]
+		return result
+
+
+
+	def get_page_ids_from_categories(self, categories):
+		page_ids = set()
+		for category in categories:
+			cache_location = self.cache_dir / self.hostname / 'categories' / category
+			cache_location.parent.mkdir(parents=True, exist_ok=True)
+			if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+				# Get from internet
+				params = {
+					'action': 'query',
+					'list': 'categorymembers',
+					'cmtitle': f'Category:{category}',
+					'cmlimit': 'max',
+					'cmtype': 'page',
+					'format': 'json'
+				}
+				query_result = self.request_with_continue(params, 'cmcontinue')
+				with open(cache_location, 'w') as file:
+					for page in query_result['categorymembers']:
+						page_ids.add(page['pageid'])
+						file.write(str(page['pageid'] + '\n'))
+			else:
+				with open(cache_location, 'r') as file:
+					for line in file:
+						page_ids.add(int(line))
+		return page_ids
+
+	def get_ids_of_titles(self, titles):
+		unknown_titles = set()
+		page_ids = set()
+		for page_title in titles:
+			cache_location = self.cache_dir / self.hostname / 'page_titles' / page_title
+			cache_location.parent.mkdir(parents=True, exist_ok=True)
+			if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+				# Get from internet
+				unknown_titles.add(page_title)
+			else:
+				# Read from cache
+				print(f'- Using cache for id of page "{page_title}"')
+				with open(cache_location, 'r') as file:
+					page_ids.add(int(file.read()))
+		if len(unknown_titles) > 0:
+			params = {
+				'action': 'query',
+				'format': 'json'
+			}
+			data = self.chunked_request(params, 'titles', titles)
+			for page in data['query']['pages'].values():
+				if hasattr(page, 'missing'):
+					raise WordlistGenerationError(f'No such page with title {page['title']}')
+				page_ids.add(page['pageid'])
+				cache_location = self.cache_dir / self.hostname / 'page_titles' / page['title']
+				with open(cache_location, 'w') as file:
+					file.write(str(page['pageid']))
+
+		return page_ids
+	
+	def get_content_of_pages(self, page_ids: set[int]):
+		# Get content of pages
+		page_contents = set()
+		unknown_page_ids = set()
+		for page_id in page_ids:
+			cache_location = self.cache_dir / self.hostname / 'page_content' / str(page_id)
+			cache_location.parent.mkdir(parents=True, exist_ok=True)
+			if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+				# Get from internet
+				unknown_page_ids.add(page_id)
+			else:
+				# Read from cache
+				print(f'- Using cache for content of page id={page_id}')
+				with open(cache_location, 'r') as file:
+					page_contents.add(file.read())
+		if len(unknown_page_ids) > 0:
+			for page_id in unknown_page_ids:
+				params = {
+					'action': 'query',
+					'prop': 'revisions',
+					'rvprop': 'content',
+					'rvslots': 'main',
+					'format': 'json'
+				}
+				data = self.chunked_request(params, 'pageids', page_ids)
+				for page in data['query']['pages'].values():
+					c = page['revisions'][0]['slots']['main']['*']
+					page_contents.add(c)
+					cache_location = self.cache_dir / self.hostname / 'page_content' / str(page_id)
+					with open(cache_location, 'w') as file:
+						file.write(c)
+		return page_contents
+	
+	def get_all_ids(self):
+		cache_location = self.cache_dir / self.hostname / 'all_page_ids'
+		cache_location.parent.mkdir(parents=True, exist_ok=True)
+		ids = set()
+		if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+			# Get from internet
+			params = {
+				'action': 'query',
+				'list': 'allpages',
+				'aplimit': 'max',
+				'format': 'json',
+			}
+			data = self.request_with_continue(params, 'apcontinue')
+			with open(cache_location, 'w') as file:
+				for page in data['query']['allpages'].values():
+					ids.add(int(page['pageid']))
+					file.write(str(page['pageid']) + '\n')
+		else:
+			with open(cache_location, 'r') as file:
+				for line in file:
+					ids.add(int(line))
+		return ids
+
+	def __init__(self, url, session):
+		self.url = url
+		self.session = session
+		self.hostname = urlparse(config['url']).hostname
+		if self.hostname == '':
+			raise WordlistGenerationError(f'Invalid URL: {config['url']}')
+
+
+
+
 wl = WordlistGenerator()
 
 
 try:
 	# Process MediaWiki sources
 	if hasattr(args, 'mw_sources'):
-		# Function definitions
-
-		def debug_print(indent_level, text):
-			if args.debug_schema:
-				debug_schema_file.write('|  ' * indent_level + text)
-				debug_schema_file.write('\n')
-
-		def wikicode_iterate(wikicode: mwparserfromhell.wikicode.Wikicode, debug_indent_level=0):
-			if wikicode is None:
-				debug_print(debug_indent_level, '(nothing)')
-				return
-			for node in wikicode.nodes:
-				debug_print(debug_indent_level, type(node).__name__)
-				if isinstance(node, mwparserfromhell.nodes.Tag):
-					wikicode_iterate(node.contents, debug_indent_level + 1)
-				elif isinstance(node, mwparserfromhell.nodes.Text):
-					debug_print(debug_indent_level + 1, 'Value: ' + ''.join(filter(lambda c: 32 <= ord(c) <= 126, node.value)))
-					wl.continue_text_input(node.value)
-				elif isinstance(node, mwparserfromhell.nodes.Wikilink):
-					if node.title.startswith('Image:') or node.title.startswith('File:'):
-						continue
-					if node.text is None:
-						wikicode_iterate(node.title, debug_indent_level + 1)
-					else:
-						wikicode_iterate(node.text, debug_indent_level + 1)
-				elif isinstance(node, mwparserfromhell.nodes.ExternalLink):
-					wikicode_iterate(node.title, debug_indent_level + 1) # type: ignore
-				elif isinstance(node, mwparserfromhell.nodes.Heading):
-					wikicode_iterate(node.title, debug_indent_level + 1)
-				else:
-					debug_print(debug_indent_level, '(unrecognized element)')
-
-		# Request all page ids of a certain category
-		def get_pages_of_category(url, category):
-			page_ids = set()
-			params = {
-				'action': 'query',
-				'list': 'categorymembers',
-				'cmtitle': f'Category:{category}',
-				'cmlimit': 'max',
-				'cmtype': 'page',
-				'format': 'json'
-			}
-			retry_time = 5
-			while True:
-				while True:
-					try:
-						resp = session.get(url, params=params)
-						if not resp.ok:
-							raise WordlistGenerationError(f'HTTP error {resp.status_code} for category {category}')
-						break
-					except requests.RequestException as e:
-						print(f'- * Request error, retrying in {retry_time} seconds...', file=sys.stderr)
-						sleep(retry_time)
-						retry_time *= 2
-				data = resp.json()
-				if len(data['query']['categorymembers']) == 0:
-					raise WordlistGenerationError(f'Empty category "{category}"')
-				for page in data['query']['categorymembers']:
-					page_ids.add(page['pageid'])
-				if 'continue' not in data:
-					break
-				params['cmcontinue'] = data['continue']['cmcontinue']
-			return page_ids
-
-		# Request all ids of a list of titles
-		def get_ids_of_titles(url, titles):
-			params = {
-				'action': 'query',
-				'titles': '|'.join(titles),
-				'format': 'json'
-			}
-			retry_time = 5
-			while True:
-				try:
-					resp = session.get(url, params=params)
-					if not resp.ok:
-						raise WordlistGenerationError('HTTP error {resp.status_code} when getting ids of titles')
-					break
-				except requests.RequestException as e:
-					print(f'- * Request error, retrying in {retry_time} seconds...', file=sys.stderr)
-					sleep(retry_time)
-					retry_time *= 2
-			data = resp.json()
-			pages = {}
-			for page in data['query']['pages'].values():
-				if hasattr(page, 'missing'):
-					raise WordlistGenerationError(f'No such page with title {page['title']}')
-				pages[page['title']] = page['pageid']
-				# Again, we don't lowercase page titles, because MediaWiki page titles are case-sensitive
-			return pages
-		
-		def get_content_of_pages(url, page_ids: set[int]):
-			# Mediawiki api universal limit for pageids is 50
-			page_ids_list = list(page_ids)
-			chunk_size = 50
-			params = {
-				'action': 'query',
-				'prop': 'revisions',
-				'rvprop': 'content',
-				'rvslots': 'main',
-				'format': 'json'
-			}
-			page_contents = {}
-			retry_time = 5
-			for i in range(0, len(page_ids_list), chunk_size):
-				chunk = page_ids_list[i:i+chunk_size]
-				params['pageids'] = '|'.join(str(page_id) for page_id in chunk)
-				print(f'- - Pages {i} to {i+len(chunk)} of {len(page_ids_list)}')
-				while True:
-					try:
-						resp = session.get(url, params=params)
-						if not resp.ok:
-							raise WordlistGenerationError(f'HTTP error {resp.status_code} when getting content of pages with ids {page_ids}')
-						break
-					except requests.RequestException as e:
-						print(f'- * Request error, retrying in {retry_time} seconds...', file=sys.stderr)
-						sleep(retry_time)
-						retry_time *= 2
-				data = resp.json()
-				for page in data['query']['pages'].values():
-					page_contents[page['pageid']] = page['revisions'][0]['slots']['main']['*']
-			return page_contents
-
-		# Initiate session
+		# Create session
 		session = requests.Session()
 		session.headers.update({'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3.1 Safari/605.1.15'})
-
+		adapter = HTTPAdapter(max_retries=Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504]))
+		session.mount('http://', adapter)
+		session.mount('https://', adapter)
 		# For each mediawiki source
 		for config in args.mw_sources:
-			print(f'Processsing MediaWiki source: {config['url']}')
-			# Parse url to get directory
-			hostname = urlparse(config['url']).hostname
-			if hostname == '':
-				raise WordlistGenerationError(f'Invalid URL: {config['url']}')
-			# Debug file
-			if args.debug_schema:
-				debug_schema_file = open('debug_schema.txt', 'w')
-
-
+			mw = MediawikiScraper(config['url'], session)
+			print(f'Processsing MediaWiki source: {mw.url}')
 			if len(config['categories']) == 0 and len(config['pages']) == 0:
 				try:
 					input(f'Since no categories or pages were specified, the ENTIRE wiki for {config["url"]} will be downloaded. Press [Enter] to confirm. ')
 				except KeyboardInterrupt:
 					sys.exit(1)
-				
-				
-
-
-
-
-
-
+				page_ids = mw.get_all_ids()
 
 			else:
 				# Get pages from each category
-				page_ids = set()
-				for category in config['categories']:
-					cache_location = cache_dir / hostname / 'categories' / category
-					cache_location.parent.mkdir(parents=True, exist_ok=True)
-					if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
-						# Get from internet
-						print(f'- Getting pages for category "{category}"')
-						category_page_ids = get_pages_of_category(config['url'], category)
-						page_ids |= category_page_ids
-						# Update cache
-						with open(cache_location, 'w') as file:
-							for page_id in category_page_ids:
-								file.write(str(page_id) + '\n')
-					else:
-						# Read from cache
-						print(f'- Using cache for category "{category}"')
-						with open(cache_location, 'r') as file:
-							for line in file:
-								page_ids.add(int(line))
+				page_ids = mw.get_page_ids_from_categories(config['categories'])
+				page_ids |= mw.get_ids_of_titles(config['pages'])
 
-				# Add pages from command line
-				unknown_titles = set()
-				for page_title in config['pages']:
-					cache_location = cache_dir / hostname / 'page_titles' / page_title
-					cache_location.parent.mkdir(parents=True, exist_ok=True)
-					if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
-						# Get from internet
-						unknown_titles.add(page_title)
-					else:
-						# Read from cache
-						print(f'- Using cache for id of page "{page_title}"')
-						with open(cache_location, 'r') as file:
-							page_ids.add(int(file.read()))
-
-				# Process unknown titles
-				if len(unknown_titles) > 0:
-					print('- Getting id\'s of other pages from api')
-					new_pages = get_ids_of_titles(config['url'], unknown_titles)
-					for page_title, page_id in new_pages.items():
-						cache_location = cache_dir / hostname / 'page_titles' / page_title
-						cache_location.parent.mkdir(parents=True, exist_ok=True)
-						page_ids.add(page_id)
-						with open(cache_location, 'w') as file:
-							file.write(str(page_id))
-
-				# Get content of pages
-				unknown_page_ids = set()
-				for page_id in page_ids:
-					cache_location = cache_dir / hostname / 'page_content' / str(page_id)
-					cache_location.parent.mkdir(parents=True, exist_ok=True)
-					if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
-						# Get from internet
-						unknown_page_ids.add(page_id)
-					else:
-						# Read from cache
-						print(f'- Using cache for content of page id={page_id}')
-						with open(cache_location, 'r') as file:
-							wikicode_iterate(mwparserfromhell.parse(file.read()))
-				
-				# Unknown pages
-				if len(unknown_page_ids) > 0:
-					print('- Getting content of other pages from api')
-					page_contents = get_content_of_pages(config['url'], unknown_page_ids)
-					for page_id, content in page_contents.items():
-						cache_location = cache_dir / hostname / 'page_content' / str(page_id)
-						cache_location.parent.mkdir(parents=True, exist_ok=True)
-						with open(cache_location, 'w') as file:
-							file.write(content)
-						wikicode_iterate(mwparserfromhell.parse(content))
-
-			# Close debug file
-			if args.debug_schema:
-				debug_schema_file.close() # type: ignore
+			for content in  mw.get_content_of_pages(page_ids):
+				wikicode_iterate(mwparserfromhell.parse(content))
 
 
-
+		session.close()
 
 	# Write rules
 	with open(args.outfile, 'w') as out_file:
 		for word in wl.list:
 			out_file.write(word)
 			out_file.write('\n')
-	print(f'Generated {len(wl.list)} words.')
+	print(f'Generated {len(wl.list)} base passwords.')
+	
 except WordlistGenerationError as e:
 	print('Error: '+ str(e), file=sys.stderr)
