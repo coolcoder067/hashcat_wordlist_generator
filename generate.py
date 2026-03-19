@@ -66,9 +66,10 @@ class MwPageAction(argparse.Action):
 parser = argparse.ArgumentParser(description='Create a wordlist from a MediaWiki site. ')
 parser.add_argument('--outfile', '-o', default='wordlist.txt', help='File to store generated wordlist. Default wordlist.txt')
 parser.add_argument('--infile', '-i', action='append', help='Text file input')
-parser.add_argument('--mw-source', action=MwSourceAction, help='The URL of the MediaWiki api endpoint.')
+parser.add_argument('--mw-source', action=MwSourceAction, help='The URL of the MediaWiki api endpoint. You can use this flag multiple times.')
 parser.add_argument('--mw-category', action=MwCategoryAction, help='Category name for the preceding --mw-source. You can use this flag multiple times.')
 parser.add_argument('--mw-page', action=MwPageAction, help='Page name for the preceding --mw-source. You can use this flag multiple times.')
+parser.add_argument('--mw-url', action='append', help='A standalone MediaWiki url to scrape. You can use this flag multiple times.')
 parser.add_argument('--variation-join-space', choices=['on', 'off'], default='on', help='Default ON. Join words with spaces.')
 parser.add_argument('--variation-join-dash', choices=['on', 'off'], default='off', help='Default OFF. Join words with dashes.')
 parser.add_argument('--variation-join-underscore', choices=['on', 'off'], default='off', help='Default OFF. Join words with underscores.')
@@ -81,7 +82,7 @@ parser.add_argument('--variation-cap-titlecase', choices=['on', 'off'], default=
 parser.add_argument('--variation-chars-original', choices=['on', 'off'], default='off', help='Default OFF. Allow all ASCII characters.')
 parser.add_argument('--variation-chars-lettersonly', choices=['on', 'off'], default='off', help='Default OFF. Allow only letters A-Z.')
 parser.add_argument('--variation-chars-alnum', choices=['on', 'off'], default='on', help='Default ON. Allow letters A-Z, numbers 0-9.')
-parser.add_argument('--variation-chars-nopunctuation', choices=['on', 'off'], default='on', help='Default ON. Allow all ASCII characters but ,.?!:;')
+parser.add_argument('--variation-chars-nopunctuation', choices=['on', 'off'], default='off', help='Default OFF. Allow all ASCII characters but ,.?!:;')
 parser.add_argument('--consecutive-words', type=int, default=2, help='Default 2. The maximum number of consecutive words to form combinations with.')
 parser.add_argument('--consecutive-words-important', type=int, default=5, help='Default 5. The maximum number of consecutive words to form combinations with, when text is deemed to be especially "important" (e.g. link text).')
 parser.add_argument('--debug-schema', action='store_true', help='Output an additional file with an outline of the schema.')
@@ -196,10 +197,16 @@ class MediawikiScraper:
 	def _safe_request(self, params):
 		try:
 			resp = self.session.get(self.url, params=params)
-			if not resp.ok:
-				raise WordlistGenerationError(f'HTTP error {resp.status_code} for url {resp.url}')
+			try:
+				resp.raise_for_status()
+			except requests.RequestException as e:
+				if self.catch_request_exceptions:
+					raise WordlistGenerationError(f'HTTP error {resp.status_code} for url {resp.url}')
+				raise
 		except requests.RequestException as e:
-			raise WordlistGenerationError(f'Request error for host {self.url}: {e}')
+			if self.catch_request_exceptions:
+				raise WordlistGenerationError(f'Request error for host {self.url}: {e}')
+			raise
 		data = resp.json()
 		if 'error' in data:
 			raise WordlistGenerationError(f'Api returned error for {resp.url}: {data['error']['message']}')
@@ -338,22 +345,26 @@ class MediawikiScraper:
 					ids.add(int(line))
 		return ids
 
-	def __init__(self, url, session):
+	def __init__(self, url, session, catch_request_exceptions=True):
 		self.url = url
 		self.session = session
-		self.hostname = urlparse(config['url']).hostname
-		if self.hostname == '':
-			raise WordlistGenerationError(f'Invalid URL: {config['url']}')
+		self.catch_request_exceptions = catch_request_exceptions
+		parsed = urlparse(url)
+		if parsed.scheme != 'http' and parsed.scheme != 'https':
+			raise WordlistGenerationError(f'Url {url} should start with http or https')
+		self.hostname = parsed.hostname
+		if not self.hostname:
+			raise WordlistGenerationError(f'Invalid URL: {url}')
 
 
 
 
 wl = WordlistGenerator(args)
 
-
 try:
 	# Process MediaWiki sources
-	if hasattr(args, 'mw_sources'):
+	if hasattr(args, 'mw_sources') or args.mw_url is not None:
+		page_ids = set()
 		# Create session
 		session = requests.Session()
 		session.headers.update({'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3.1 Safari/605.1.15'})
@@ -361,22 +372,43 @@ try:
 		session.mount('http://', adapter)
 		session.mount('https://', adapter)
 		# For each mediawiki source
-		for config in args.mw_sources:
+		for config in args.mw_sources if hasattr(args, 'mw_sources') else []:
 			mw = MediawikiScraper(config['url'], session)
 			if len(config['categories']) == 0 and len(config['pages']) == 0:
 				try:
 					input(f'Since no categories or pages were specified, the ENTIRE wiki for {config["url"]} will be downloaded. Press [Enter] to confirm. ')
 				except KeyboardInterrupt:
 					sys.exit(1)
-				page_ids = mw.get_all_ids()
+				page_ids |= mw.get_all_ids()
 
 			else:
 				# Get pages from each category
-				page_ids = mw.get_page_ids_from_categories(config['categories'])
+				page_ids |= mw.get_page_ids_from_categories(config['categories'])
 				page_ids |= mw.get_ids_of_titles(config['pages'])
 
 			for content in mw.get_content_of_pages(page_ids):
 				wikicode_iterate(mwparserfromhell.parse(content))
+
+		# Process individual URLs
+		for url in args.mw_url or []:
+			parsed = urlparse(url)
+			if parsed.scheme != 'http' and parsed.scheme != 'https':
+				raise WordlistGenerationError(f'Url {url} should start with http or https')
+			title = [x for x in parsed.path.split('/') if x][-1]
+			for endpoint_path in ['/api.php', '/w/api.php']:
+				endpoint = urlparse(url)._replace(path=endpoint_path, fragment='').geturl()
+				mw = MediawikiScraper(endpoint, session, catch_request_exceptions=False)
+				try:
+					page_ids |= mw.get_ids_of_titles([title])
+					for content in mw.get_content_of_pages(page_ids):
+						wikicode_iterate(mwparserfromhell.parse(content))
+					break
+				except requests.RequestException:
+					continue
+			else:
+				# Both endpoints failed
+				raise WordlistGenerationError(f"Could not find valid API endpoint for {url}")
+
 
 
 		session.close()
