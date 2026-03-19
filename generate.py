@@ -249,12 +249,12 @@ class MediawikiScraper:
 					'cmtype': 'page',
 					'format': 'json'
 				}
-				with open(cache_location, 'w') as file:
+				with open(cache_location, 'w', encoding='utf-8') as file:
 					for page in self._request_with_continue('categorymembers', params, 'cmcontinue'):
 						page_ids.add(page['pageid'])
 						file.write(str(page['pageid']) + '\n')
 			else:
-				with open(cache_location, 'r') as file:
+				with open(cache_location, 'r', encoding='utf-8') as file:
 					for line in file:
 						page_ids.add(int(line))
 		return page_ids
@@ -270,7 +270,7 @@ class MediawikiScraper:
 				unknown_titles.add(page_title)
 			else:
 				# Read from cache
-				with open(cache_location, 'r') as file:
+				with open(cache_location, 'r', encoding='utf-8') as file:
 					page_ids.add(int(file.read()))
 		# Not in cache
 		params = {
@@ -282,7 +282,7 @@ class MediawikiScraper:
 				raise WordlistGenerationError(f'No such page with title {page['title']}')
 			page_ids.add(page['pageid'])
 			cache_location = self.cache_dir / self.hostname / 'page_titles' / page['title']
-			with open(cache_location, 'w') as file:
+			with open(cache_location, 'w', encoding='utf-8') as file:
 				file.write(str(page['pageid']))
 		return page_ids
 	
@@ -298,7 +298,7 @@ class MediawikiScraper:
 				unknown_page_ids.add(page_id)
 			else:
 				# Read from cache
-				with open(cache_location, 'r') as file:
+				with open(cache_location, 'r', encoding='utf-8') as file:
 					page_contents.add(file.read())
 		# Pages not in cache
 		params = {
@@ -312,7 +312,7 @@ class MediawikiScraper:
 			c = page['revisions'][0]['slots']['main']['*']
 			page_contents.add(c)
 			cache_location = self.cache_dir / self.hostname / 'page_content' / str(page['pageid'])
-			with open(cache_location, 'w') as file:
+			with open(cache_location, 'w', encoding='utf-8') as file:
 				file.write(c)
 		return page_contents
 	
@@ -328,12 +328,12 @@ class MediawikiScraper:
 				'aplimit': 'max',
 				'format': 'json',
 			}
-			with open(cache_location, 'w') as file:
+			with open(cache_location, 'w', encoding='utf-8') as file:
 				for page in self._request_with_continue('allpages', params, 'apcontinue'):
 					ids.add(int(page['pageid']))
 					file.write(str(page['pageid']) + '\n')
 		else:
-			with open(cache_location, 'r') as file:
+			with open(cache_location, 'r', encoding='utf-8') as file:
 				for line in file:
 					ids.add(int(line))
 		return ids
@@ -382,7 +382,7 @@ try:
 		session.close()
 
 	# Write rules
-	with open(args.outfile, 'w') as out_file:
+	with open(args.outfile, 'w', encoding='utf-8') as out_file:
 		for word in wl.list:
 			out_file.write(word)
 			out_file.write('\n')
