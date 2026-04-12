@@ -248,7 +248,7 @@ class MediawikiScraper:
 		for category in categories:
 			cache_location = self.cache_dir / self.hostname / 'categories' / category
 			cache_location.parent.mkdir(parents=True, exist_ok=True)
-			if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+			if not cache_location.is_file() or time() - cache_location.stat().st_mtime > 30 * 24 * 3600: # Cache is older than 30 days
 				# Get from internet
 				params = {
 					'action': 'query',
