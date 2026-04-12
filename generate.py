@@ -274,7 +274,7 @@ class MediawikiScraper:
 		for page_title in titles:
 			cache_location = self.cache_dir / self.hostname / 'page_titles' / page_title
 			cache_location.parent.mkdir(parents=True, exist_ok=True)
-			if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+			if not cache_location.is_file() or time() - cache_location.stat().st_mtime > 30 * 24 * 3600: # Cache is older than 30 days
 				# Get from internet
 				unknown_titles.add(page_title)
 			else:
@@ -302,7 +302,7 @@ class MediawikiScraper:
 		for page_id in page_ids:
 			cache_location = self.cache_dir / self.hostname / 'page_content' / str(page_id)
 			cache_location.parent.mkdir(parents=True, exist_ok=True)
-			if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+			if not cache_location.is_file() or time() - cache_location.stat().st_mtime > 30 * 24 * 3600: # Cache is older than 30 days
 				# Get from internet
 				unknown_page_ids.add(page_id)
 			else:
@@ -329,7 +329,7 @@ class MediawikiScraper:
 		cache_location = self.cache_dir / self.hostname / 'all_page_ids'
 		cache_location.parent.mkdir(parents=True, exist_ok=True)
 		ids = set()
-		if not cache_location.is_file() or time() - cache_location.stat().st_birthtime > 30 * 24 * 3600: # Cache is older than 30 days
+		if not cache_location.is_file() or time() - cache_location.stat().st_mtime > 30 * 24 * 3600: # Cache is older than 30 days
 			# Get from internet
 			params = {
 				'action': 'query',
