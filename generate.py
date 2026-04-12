@@ -211,7 +211,7 @@ class MediawikiScraper:
 			raise
 		data = resp.json()
 		if 'error' in data:
-			raise WordlistGenerationError(f'Api returned error for {resp.url}: {data['error']['message']}')
+			raise WordlistGenerationError(f"Api returned error for {resp.url}: {data['error']['message']}")
 		return data
 
 	def _chunked_request(self, query_namespace, params: dict, key: str, values: set):
@@ -288,7 +288,7 @@ class MediawikiScraper:
 		}
 		for page in self._chunked_request('pages', params, 'titles', titles):
 			if 'missing' in page:
-				raise WordlistGenerationError(f'No such page with title {page['title']}')
+				raise WordlistGenerationError(f"No such page with title {page['title']}")
 			page_ids.add(page['pageid'])
 			cache_location = self.cache_dir / self.hostname / 'page_titles' / page['title']
 			with open(cache_location, 'w', encoding='utf-8') as file:
